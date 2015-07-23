@@ -1,5 +1,7 @@
 package com.mediative.sparrow.rwpoc.rw
 
+import scala.reflect.ClassTag
+
 import scalaz._
 import Scalaz.ToApplyOps
 import scalaz.syntax.validation._
@@ -22,7 +24,7 @@ trait ReadContext {
   def getField(name: String): Option[FieldDescriptor]
 
   trait RowApi {
-    def get(field: FieldDescriptor): Safe[ValueWrapper[_]]
+    def get(field: FieldDescriptor): Safe[TypedValue[_]]
   }
 }
 
@@ -32,13 +34,13 @@ trait WriteContext {
   def empty: Row
 
   trait RowApi {
-    def +(field: (String, Option[ValueWrapper[_]])): Row
+    def +(field: (String, Option[TypedValue[_]])): Row
     def +(row: Row): Row
   }
 }
 
 //trait Row {
-//  def get(fieldName: String): ValueWrapper[_]
+//  def get(fieldName: String): TypedValue[_]
 //}
 
 sealed trait FieldType[T]
@@ -63,11 +65,10 @@ case class DateWrapper(date: DateTime, format: DateTimeFormatter) {
   override def toString: String = format.print(date)
 }
 
-case class ValueWrapper[T](value: T)(implicit val fieldType: FieldType[T])
+case class TypedValue[T](fieldType: FieldType[T], value: T)
 
 object TypedValue {
-  def unapply[T](wrapper: ValueWrapper[T]): Option[(FieldType[T], T)] =
-    Some(wrapper.fieldType -> wrapper.value)
+  def apply[T](value: T)(implicit fieldType: FieldType[T]): TypedValue[T] = TypedValue(fieldType, value)
 }
 
 case class Field(name: String, fieldType: FieldType[_], optional: Boolean)
@@ -79,24 +80,24 @@ object Schema {
 
 case class FieldConverter[T](
   primaryType: FieldType[_],
-  read: ValueWrapper[_] => Safe[T],
-  write: T => Option[ValueWrapper[_]],
+  read: TypedValue[_] => Safe[T],
+  write: T => Option[TypedValue[_]],
   optional: Boolean = false
 )
 
 object FieldConverter {
   import FieldType._
 
-  private def primitive[T](implicit fieldType: FieldType[T]): FieldConverter[T] = FieldConverter(
-    primaryType = StringType,
+  private def primitive[T: ClassTag](implicit fieldType: FieldType[T]): FieldConverter[T] = FieldConverter(
+    fieldType,
     read = {
-      // TODO Add non-strict support
-      case TypedValue(StringType, value) => Safe(value)
+      // TODO Add non-strict types support
+      case TypedValue(`fieldType`, value: T) => Safe(value)
     },
-    write = { value => Some(ValueWrapper(value)) }
+    write = { value => Some(TypedValue(value)) }
   )
-  implicit def stringConverter = primitive[String]
-  implicit def longConverter = primitive[Long]
+  implicit def stringConverter: FieldConverter[String] = primitive[String]
+  implicit def longConverter: FieldConverter[Long] = primitive[Long]
 }
 
 trait RowConverter[T] {
