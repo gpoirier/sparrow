@@ -11,12 +11,12 @@ import org.joda.time.format.DateTimeFormatter
 
 trait FieldConverter[T] extends Serializable { self =>
 
-  def apply(dc: DataSchema)(field: dc.FieldDescriptor): V[dc.Row => Unsafe[T]]
+  def apply(dc: DataSchema)(field: dc.FieldDescriptor): V[dc.Row => Safe[T]]
 
   def map[U](f: T => U): FieldConverter[U] = mapUnsafe(_.map(f))
 
-  def mapUnsafe[U](f: Unsafe[T] => Unsafe[U]): FieldConverter[U] = new FieldConverter[U] {
-    override def apply(dc: DataSchema)(field: dc.FieldDescriptor): V[dc.Row => Unsafe[U]] =
+  def mapUnsafe[U](f: Safe[T] => Safe[U]): FieldConverter[U] = new FieldConverter[U] {
+    override def apply(dc: DataSchema)(field: dc.FieldDescriptor): V[dc.Row => Safe[U]] =
       self.apply(dc)(field).map { _ andThen f }
   }
 
@@ -25,12 +25,12 @@ trait FieldConverter[T] extends Serializable { self =>
 object FieldConverter {
 
   def apply[A: FieldConverter, B](f: A => B): FieldConverter[B] = reader[A].map(f)
-  def unsafe[A: FieldConverter, B](f: Unsafe[A] => Unsafe[B]): FieldConverter[B] = reader[A].mapUnsafe(f)
+  def unsafe[A: FieldConverter, B](f: Safe[A] => Safe[B]): FieldConverter[B] = reader[A].mapUnsafe(f)
 
   def reader[T](implicit fc: FieldConverter[T]): FieldConverter[T] = fc
 
   def primitiveConverter[T: PrimitiveType](typeName: String) = new FieldConverter[T] {
-    override def apply(dc: DataSchema)(field: dc.FieldDescriptor): V[(dc.Row) => Unsafe[T]] = {
+    override def apply(dc: DataSchema)(field: dc.FieldDescriptor): V[(dc.Row) => Safe[T]] = {
       if (!dc.is[T](field)) {
         s"The field $field is expected to be of type $typeName".failureNel
       } else Success { row =>

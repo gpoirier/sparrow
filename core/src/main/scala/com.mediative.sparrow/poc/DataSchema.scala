@@ -17,7 +17,7 @@ trait DataSchema { self =>
   def findField(name: String): FieldDescriptor
 
   def is[T: PrimitiveType](field: FieldDescriptor): Boolean
-  def get[T: PrimitiveType](field: FieldDescriptor): Unsafe[T]
+  def get[T: PrimitiveType](field: FieldDescriptor): Safe[T]
 }
 
 sealed trait PrimitiveType[T]
