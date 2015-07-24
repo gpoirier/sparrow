@@ -39,9 +39,9 @@ trait WriteContext {
   }
 }
 
-//trait Row {
-//  def get(fieldName: String): TypedValue[_]
-//}
+trait Row {
+  def get(fieldName: String): TypedValue[_]
+}
 
 sealed trait FieldType[T]
 
@@ -55,7 +55,7 @@ object FieldType {
   implicit case object BigIntType extends FieldType[BigInt]
   implicit case object BigDecimalType extends FieldType[BigDecimal]
   implicit case object DateType extends FieldType[DateWrapper]
-  //implicit case object RowType extends FieldType[Row]
+  implicit case object RowType extends FieldType[Row]
 
   case class ListType[T](implicit elementType: FieldType[T]) extends FieldType[List[T]]
   implicit def listType[T: FieldType] = ListType[T]
@@ -98,6 +98,12 @@ object FieldConverter {
   )
   implicit def stringConverter: FieldConverter[String] = primitive[String]
   implicit def longConverter: FieldConverter[Long] = primitive[Long]
+
+  implicit def fromRowConverter[T](implicit rc: RowConverter[T]): FieldConverter[T] = FieldConverter(
+    primaryType = RowType,
+    read = { x => ??? },
+    write = { value => Some(rc.write()) }
+  )
 }
 
 trait RowConverter[T] {
