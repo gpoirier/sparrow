@@ -12,104 +12,148 @@ import scalaz.syntax.validation._
 import play.api.libs.functional.{ Applicative => PApplicative, Functor => PFunctor, FunctionalBuilderOps }
 
 import com.mediative.sparrow.Alias._
-import com.mediative.sparrow.poc.{ Safe, Missing }
+import com.mediative.sparrow.poc.{ Safe, Missing, Invalid }
 
 import com.github.nscala_time.time.Imports._
 import org.joda.time.format.DateTimeFormatter
-
-trait ReadContext {
-  type Row <: RowApi
-  type FieldDescriptor
-
-  def getField(name: String): Option[FieldDescriptor]
-
-  trait RowApi {
-    def get(field: FieldDescriptor): Safe[TypedValue[_]]
-  }
-}
-
-trait WriteContext {
-  type Row <: RowApi
-
-  def empty: Row
-
-  trait RowApi {
-    def +(field: (String, Option[TypedValue[_]])): Row
-    def +(row: Row): Row
-  }
-}
-
-trait Row {
-  def get(fieldName: String): TypedValue[_]
-}
-
-sealed trait FieldType[T]
-
-object FieldType {
-  implicit case object StringType extends FieldType[String]
-  implicit case object LongType extends FieldType[Long]
-  implicit case object IntType extends FieldType[Int]
-  implicit case object ByteType extends FieldType[Byte]
-  implicit case object FloatType extends FieldType[Float]
-  implicit case object DoubleType extends FieldType[Double]
-  implicit case object BigIntType extends FieldType[BigInt]
-  implicit case object BigDecimalType extends FieldType[BigDecimal]
-  implicit case object DateType extends FieldType[DateWrapper]
-  implicit case object RowType extends FieldType[Row]
-
-  case class ListType[T](implicit elementType: FieldType[T]) extends FieldType[List[T]]
-  implicit def listType[T: FieldType] = ListType[T]
-}
 
 case class DateWrapper(date: DateTime, format: DateTimeFormatter) {
   override def toString: String = format.print(date)
 }
 
-case class TypedValue[T](fieldType: FieldType[T], value: T)
+sealed trait PrimitiveType[T]
 
-object TypedValue {
-  def apply[T](value: T)(implicit fieldType: FieldType[T]): TypedValue[T] = TypedValue(fieldType, value)
+object PrimitiveType {
+  implicit case object StringType extends PrimitiveType[String]
+  implicit case object LongType extends PrimitiveType[Long]
+  implicit case object IntType extends PrimitiveType[Int]
+  implicit case object ByteType extends PrimitiveType[Byte]
+  implicit case object FloatType extends PrimitiveType[Float]
+  implicit case object DoubleType extends PrimitiveType[Double]
+  implicit case object BigIntType extends PrimitiveType[BigInt]
+  implicit case object BigDecimalType extends PrimitiveType[BigDecimal]
+  implicit case object DateType extends PrimitiveType[DateWrapper]
 }
 
-case class Field(name: String, fieldType: FieldType[_], optional: Boolean)
-case class Schema(fields: IndexedSeq[Field])
+trait Context {
+  type Row <: RowApi
+  type FieldDescriptor
 
-object Schema {
-  def apply(fields: Field*): Schema = Schema(fields.toIndexedSeq)
-}
+  implicit def rowClassTag: ClassTag[Row]
 
-case class FieldConverter[T](
-  primaryType: FieldType[_],
-  read: TypedValue[_] => Safe[T],
-  write: T => Option[TypedValue[_]],
-  optional: Boolean = false
-)
+  def getField(name: String): Option[FieldDescriptor]
 
-object FieldConverter {
+  trait RowApi {
+    def get(field: FieldDescriptor): Safe[TypedValue[_]]
+    def +(field: (String, Option[TypedValue[_]])): Row
+    def +(row: Row): Row
+  }
+
+  def emptyRow: Row
+
+  sealed trait FieldType[T]
+
+  object FieldType {
+    implicit case object RowType extends FieldType[Row]
+
+    case class ListType[T](implicit elementType: FieldType[T]) extends FieldType[List[T]]
+    implicit def listType[T: FieldType] = ListType[T]
+
+    case class PrimitiveFieldType[T](implicit primitiveType: PrimitiveType[T]) extends FieldType[T]
+    implicit def primitiveType[T: PrimitiveType] = PrimitiveFieldType[T]
+  }
+
   import FieldType._
 
-  private def primitive[T: ClassTag](implicit fieldType: FieldType[T]): FieldConverter[T] = FieldConverter(
-    fieldType,
-    read = {
-      // TODO Add non-strict types support
-      case TypedValue(`fieldType`, value: T) => Safe(value)
-    },
-    write = { value => Some(TypedValue(value)) }
+  case class TypedValue[T](fieldType: FieldType[T], value: T)
+
+  object TypedValue {
+    def apply[T](value: T)(implicit fieldType: FieldType[T]): TypedValue[T] = TypedValue(fieldType, value)
+  }
+
+  case class Field(name: String, fieldType: FieldType[_], optional: Boolean)
+  case class Schema(fields: IndexedSeq[Field])
+
+  object Schema {
+    def apply(fields: Field*): Schema = Schema(fields.toIndexedSeq)
+  }
+
+  case class FieldConverterApi[T](
+    primaryType: FieldType[_],
+    reader: V[TypedValue[_] => Safe[T]],
+    writer: T => Option[TypedValue[_]],
+    optional: Boolean = false
   )
+
+  case class RowConverterApi[T](
+    schema: Schema,
+    reader: V[Row => Safe[T]],
+    writer: T => Row
+  )
+
+  def field[T](name: String, fc: FieldConverterApi[T]): RowConverterApi[T] = RowConverterApi[T](
+    schema = Schema(Field(name, fc.primaryType, fc.optional)),
+    reader = {
+      import Validation.FlatMap._
+
+      fc.reader.flatMap { reader =>
+        getField(name).map { field =>
+          Success { row: Row =>
+            row.get(field).flatMap(reader)
+          }
+        } getOrElse {
+          if (fc.optional) {
+            Success { row: Row => Missing }
+          } else {
+            s"The field $name is missing.".failureNel
+          }
+        }
+      }
+    },
+    writer = src => emptyRow + (name -> fc.writer(src))
+  )
+
+  def fromRowConverter[T](rc: RowConverterApi[T]): FieldConverterApi[T] = FieldConverterApi(
+    primaryType = RowType,
+    reader = rc.reader.map { f =>
+      {
+        case TypedValue(RowType, row: Row) => f(row)
+      }
+    },
+    writer = { value => Some(TypedValue(RowType, rc.writer(value))) }
+  )
+
+  def primitive[T: ClassTag](fieldType: FieldType[T]): FieldConverterApi[T] = FieldConverterApi(
+    primaryType = fieldType,
+    reader = {
+      Success {
+        case TypedValue(`fieldType`, value: T) => Safe(value)
+        case TypedValue(tpe, value) => Invalid(s"Unexpected field type ($tpe) for value: $value")
+      }
+    },
+    writer = { value => Some(TypedValue(fieldType, value)) }
+  )
+}
+
+trait FieldConverter[T] {
+  def converter(c: Context): c.FieldConverterApi[T]
+}
+
+object FieldConverter {
+
+  def primitive[T: PrimitiveType: ClassTag] = new FieldConverter[T] {
+    override def converter(c: Context): c.FieldConverterApi[T] = c.primitive(c.FieldType.primitiveType[T])
+  }
   implicit def stringConverter: FieldConverter[String] = primitive[String]
   implicit def longConverter: FieldConverter[Long] = primitive[Long]
 
-  implicit def fromRowConverter[T](implicit rc: RowConverter[T]): FieldConverter[T] = FieldConverter(
-    primaryType = RowType,
-    read = { x => ??? },
-    write = { value => Some(rc.write()) }
-  )
+  implicit def fromRowConverter[T](implicit rc: RowConverter[T]): FieldConverter[T] = new FieldConverter[T] {
+    override def converter(c: Context): c.FieldConverterApi[T] = c.fromRowConverter(rc.converter(c))
+  }
 }
 
 trait RowConverter[T] {
-  def schema: Schema
-  def read(c: ReadContext): V[c.Row => Safe[T]]
-  def write(c: WriteContext): T => c.Row
+  def converter(c: Context): c.RowConverterApi[T]
 }
 
 object RowConverter {
@@ -128,24 +172,9 @@ object RowConverter {
   implicit def RowConverterApplicative: RowConverterApplicative = ???
 
   def field[T](name: String)(implicit fc: FieldConverter[T]): RowConverter[T] = new RowConverter[T] {
-    override def schema: Schema = Schema(Field(name, fc.primaryType, fc.optional))
-    override def read(c: ReadContext): V[c.Row => Safe[T]] = {
-      c.getField(name).map { field =>
-        Success { row: c.Row =>
-           row.get(field).flatMap(fc.read)
-        }
-      } getOrElse {
-        if (fc.optional) {
-          Success { row: c.Row => Missing }
-        } else {
-          s"The field $name is missing.".failureNel
-        }
-      }
-    }
-    override def write(c: WriteContext): T => c.Row = { src =>
-      c.empty + (name -> fc.write(src))
-    }
+    override def converter(c: Context): c.RowConverterApi[T] = c.field[T](name, fc.converter(c))
   }
+
 }
 
 import RowConverter._
@@ -158,4 +187,13 @@ object Simple {
     field[String]("name") and
     field[Long]("count")
   )((name: String, count: Long) => apply(name, count))
+}
+
+case class Parent(name: String, child: Simple)
+
+object Parent {
+  implicit val schema = (
+    field[String]("name") and
+    field[Simple]("child")
+  )(apply _)
 }
