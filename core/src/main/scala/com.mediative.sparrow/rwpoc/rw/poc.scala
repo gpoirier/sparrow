@@ -17,10 +17,6 @@ import com.mediative.sparrow.poc.{ Safe, Missing, Invalid }
 import com.github.nscala_time.time.Imports._
 import org.joda.time.format.DateTimeFormatter
 
-case class DateWrapper(date: DateTime, format: DateTimeFormatter) {
-  override def toString: String = format.print(date)
-}
-
 sealed trait PrimitiveType[T]
 
 object PrimitiveType {
@@ -32,7 +28,7 @@ object PrimitiveType {
   implicit case object DoubleType extends PrimitiveType[Double]
   implicit case object BigIntType extends PrimitiveType[BigInt]
   implicit case object BigDecimalType extends PrimitiveType[BigDecimal]
-  implicit case object DateType extends PrimitiveType[DateWrapper]
+  case class DateType(fmt: DateTimeFormatter) extends PrimitiveType[DateTime]
 }
 
 trait Context {
@@ -83,7 +79,14 @@ trait Context {
     reader: V[TypedValue[_] => Safe[T]],
     writer: T => Option[TypedValue[_]],
     optional: Boolean = false
-  )
+  ) { self =>
+    def transform[U](reader: Safe[T] => Safe[U], writer: U => T): FieldConverterApi[U] = FieldConverterApi(
+      self.primaryType,
+      self.reader.map { _ andThen reader },
+      writer andThen self.writer,
+      self.optional
+    )
+  }
 
   case class RowConverterApi[T](
     schema: Schema,
@@ -135,20 +138,83 @@ trait Context {
   )
 }
 
-trait FieldConverter[T] {
+case class Transformer[A, B](reader: Safe[A] => Safe[B], writer: B => A)
+
+object Transformer {
+  def from[A, B](reader: A => B, writer: B => A): Transformer[A, B] =
+    Transformer(_.map(reader), writer)
+}
+
+trait FieldConverter[T] { self =>
   def converter(c: Context): c.FieldConverterApi[T]
+
+  def transform[U](reader: T => U, writer: U => T): FieldConverter[U] = transformSafe(
+    reader = _.map(reader),
+    writer = writer
+  )
+
+  def transform[U](transformer: Transformer[T, U]): FieldConverter[U] =
+    transformSafe(transformer.reader, transformer.writer)
+
+  def transformSafe[U](reader: Safe[T] => Safe[U], writer: U => T): FieldConverter[U] = new FieldConverter[U] {
+    override def converter(c: Context): c.FieldConverterApi[U] = self.converter(c).transform(reader, writer)
+  }
 }
 
 object FieldConverter {
 
+  def converter[T](implicit fc: FieldConverter[T]): FieldConverter[T] = fc
+  def apply[T: FieldConverter, U](transformer: Transformer[T, U]): FieldConverter[U] =
+    converter[T].transform(transformer)
+
   def primitive[T: PrimitiveType: ClassTag] = new FieldConverter[T] {
     override def converter(c: Context): c.FieldConverterApi[T] = c.primitive(c.FieldType.primitiveType[T])
   }
-  implicit def stringConverter: FieldConverter[String] = primitive[String]
-  implicit def longConverter: FieldConverter[Long] = primitive[Long]
+  implicit val stringConverter: FieldConverter[String] = primitive
+  implicit val longConverter: FieldConverter[Long] = primitive
+  implicit val intConverter: FieldConverter[Int] = primitive
+  implicit val byteConverter: FieldConverter[Byte] = primitive
+  implicit val floatConverter: FieldConverter[Float] = primitive
+  implicit val doubleConverter: FieldConverter[Double] = primitive
+  implicit val bigIntConverter: FieldConverter[BigInt] = primitive
+  implicit val bigDecimalConverter: FieldConverter[BigDecimal] = primitive
+
+  val isoDateFormat = DateTimeFormat.forPattern("yyyy-MM-dd'T'HH:mm:ss.SSSZ")
+  implicit def dateTimeConverter(fmt: DateTimeFormatter): FieldConverter[DateTime] =
+    primitive(PrimitiveType.DateType(fmt), implicitly[ClassTag[DateTime]])
+  implicit val isoDateTimeConverter: FieldConverter[DateTime] = dateTimeConverter(isoDateFormat)
+
+  val dateTimeToLocalDate = Transformer.from[DateTime, LocalDate](
+    reader = _.toLocalDate,
+    writer = _.toDateTimeAtStartOfDay
+  )
+
+  implicit def isoLocalDateConverter: FieldConverter[LocalDate] = FieldConverter(dateTimeToLocalDate)
+
+  implicit def localDateConverter(fmt: DateTimeFormatter): FieldConverter[LocalDate] =
+    dateTimeConverter(fmt).transform(dateTimeToLocalDate)
+  implicit def dateTimeConverterFromString(pattern: String): FieldConverter[DateTime] =
+    DateTimeFormat.forPattern(pattern)
+  implicit def localDateConverterFromString(pattern: String): FieldConverter[LocalDate] =
+    DateTimeFormat.forPattern(pattern)
+
 
   implicit def fromRowConverter[T](implicit rc: RowConverter[T]): FieldConverter[T] = new FieldConverter[T] {
     override def converter(c: Context): c.FieldConverterApi[T] = c.fromRowConverter(rc.converter(c))
+  }
+}
+
+case class DatePattern(fmt: DateTimeFormatter)
+
+object DatePattern {
+  def apply(pattern: String): DatePattern = DatePattern(DateTimeFormat.forPattern(pattern))
+
+  implicit def toDateTimeFieldConverter(dtp: DatePattern): FieldConverter[DateTime] = {
+    FieldConverter.dateTimeConverter(dtp.fmt)
+  }
+
+  implicit def toLocalDateFieldConverter(dtp: DatePattern): FieldConverter[LocalDate] = {
+    FieldConverter.localDateConverter(dtp.fmt)
   }
 }
 
