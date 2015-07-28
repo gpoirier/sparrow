@@ -6,10 +6,12 @@ import scalaz._
 import scalaz.syntax.apply._
 import scalaz.syntax.validation._
 
-//import org.apache.spark.sql._
-//import org.apache.spark.sql.types._
-
-import play.api.libs.functional.{ Applicative => PApplicative, Functor => PFunctor, FunctionalBuilderOps }
+import play.api.libs.functional.{
+  Applicative => PApplicative,
+  Functor => PFunctor,
+  InvariantFunctor,
+  FunctionalBuilderOps
+}
 
 import com.mediative.sparrow.Alias._
 
@@ -249,10 +251,19 @@ object Transformer {
     Transformer(_.map(reader), writer)
 }
 
-trait RowConverter[T] {
+trait RowConverter[T] { self =>
   def schema(c: Context): c.Schema
   def reader(c: ReadContext): V[c.Row => Safe[T]]
   def writer(c: WriteContext): T => c.Row
+
+  def transform[U](transformer: Transformer[T, U]): RowConverter[U] = new RowConverter[U] {
+    override def reader(c: ReadContext): V[c.Row => Safe[U]] =
+      self.reader(c).map(_ andThen transformer.reader)
+    override def writer(c: WriteContext): U => c.Row =
+      transformer.writer andThen self.writer(c)
+    override def schema(c: Context): c.Schema =
+      self.schema(c)
+  }
 }
 
 object RowConverter {
@@ -288,9 +299,17 @@ object RowConverter {
     }
   }
 
-  trait RowConverterApplicative extends PApplicative[RowConverter] with PFunctor[RowConverter]
+  trait RowConverterApplicative extends PApplicative[RowConverter] with InvariantFunctor[RowConverter] with PFunctor[RowConverter]
 
-  implicit def RowConverterApplicative: RowConverterApplicative = ???
+  implicit def RowConverterApplicative: RowConverterApplicative = new RowConverterApplicative {
+    override def pure[A](a: A): RowConverter[A] = ???
+    override def fmap[A, B](m: RowConverter[A], f: A => B): RowConverter[B] = map(m, f)
+    override def map[A, B](m: RowConverter[A], f: A => B): RowConverter[B] = ???
+    override def apply[A, B](mf: RowConverter[A => B], ma: RowConverter[A]): RowConverter[B] = ???
+
+    override def inmap[A, B](m: RowConverter[A], reader: A => B, writer: B => A): RowConverter[B] =
+      m.transform(Transformer.from(reader, writer))
+  }
 }
 
 import RowConverter._
