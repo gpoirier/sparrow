@@ -17,8 +17,28 @@ trait DataSchema { self =>
   def findField(name: String): FieldDescriptor
 
   def is[T: PrimitiveType](field: FieldDescriptor): Boolean
-  def get[T: PrimitiveType](field: FieldDescriptor): Unsafe[T]
+  def get[T: PrimitiveType](field: FieldDescriptor, row: Row): Safe[T]
 }
+
+trait SerializationContext {
+
+  trait SchemaApi {
+    def fieldNames: IndexedSeq[String]
+    def findField(name: String): Field
+  }
+
+  trait FieldApi {
+    def is[T: PrimitiveType]: Boolean
+    def get[T: PrimitiveType](row: Row): Safe[T]
+  }
+
+  type Row
+  type Field <: FieldApi
+
+  type Schema <: SchemaApi
+
+}
+
 
 sealed trait PrimitiveType[T]
 
