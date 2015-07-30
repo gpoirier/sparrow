@@ -20,18 +20,18 @@ case class NamedStruct(name: String, tpe: StructType) {
   def description: String = s"$name ($field)"
 }
 
-class SparkReadContext(tpe: StructType) extends ReadContext {
+class SparkReadContext(tpe: StructType) extends ReadContext with Serializable {
   override type FieldDescriptor = NamedStruct
   override type Row = SparkInputRow
 
   case class SparkInputRow(underlying: SparkRow, schema: Schema) extends InputRow {
-    override def get(field: NamedStruct): Safe[TypedValue[_]] = {
+    override def get(field: NamedStruct): TypedValue[_] = {
       import field._
-      if (underlying.isNullAt(index)) Missing
+      if (underlying.isNullAt(index)) { TypedValue[Nothing](FieldType.NullType, Missing) }
       else underlying.get(index) match {
-        case x: String => Safe(TypedValue(x))
-        case x: Int => Safe(TypedValue(x))
-        case x: Long => Safe(TypedValue(x))
+        case x: String => TypedValue(x)
+        case x: Int => TypedValue(x)
+        case x: Long => TypedValue(x)
       }
     }
   }
@@ -44,7 +44,7 @@ class SparkReadContext(tpe: StructType) extends ReadContext {
 
 }
 
-object SparkWriteContext extends WriteContext {
+object SparkWriteContext extends WriteContext with Serializable {
 
   override type Row = SparkOutputRow
 
@@ -55,7 +55,6 @@ object SparkWriteContext extends WriteContext {
 
 object DataFrameReader {
   def toRDD[T: ClassTag](df: DataFrame)(implicit rc: RowConverter[T]): V[RDD[T]] = {
-    //rc.validateAndApply(df.schema).map { f => df.map(f) }
     val c = new SparkReadContext(df.schema)
     val schema = rc.schema(c)
     rc.reader(c).map { f => df.map { row => f(c.SparkInputRow(row, schema)).getRequired } }
