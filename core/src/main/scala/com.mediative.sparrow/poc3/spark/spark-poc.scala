@@ -57,6 +57,7 @@ object DataFrameReader {
   def toRDD[T: ClassTag](df: DataFrame)(implicit rc: RowConverter[T]): V[RDD[T]] = {
     val c = new SparkReadContext(df.schema)
     val schema = rc.schema(c)
+    println(schema)
     rc.reader(c).map { f => df.map { row => f(c.SparkInputRow(row, schema)).getRequired } }
   }
 }

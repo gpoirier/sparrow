@@ -113,8 +113,6 @@ trait ReadContext extends Context {
 
   override type Row <: InputRow
 
-  //implicit def rowClassTag: ClassTag[Row]
-
   def getField(name: String): Option[FieldDescriptor]
 
   trait InputRow {
@@ -318,15 +316,16 @@ object RowConverter {
     }
     override def reader(c: ReadContext): V[c.Row => Safe[T]] = {
       import Validation.FlatMap._
-      fc.reader(c).flatMap { reader =>
-        c.getField(name).map { field =>
+
+      c.getField(name).map { field =>
+        fc.reader(c).flatMap { reader =>
           Success { row: c.Row =>
             reader(row.get(field))
           }
-        } getOrElse {
-          if (fc.optional) Success { row: c.Row => fc.missing }
-          else s"The field $name is missing.".failureNel
         }
+      } getOrElse {
+        if (fc.optional) Success { row: c.Row => fc.missing }
+        else s"The field $name is missing.".failureNel
       }
     }
     override def writer(c: WriteContext): T => c.Row = {
