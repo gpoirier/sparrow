@@ -133,10 +133,22 @@ class DataFrameReaderTest extends FreeSpec with BeforeAndAfterAll {
 
     def testSuccess[T: RowConverter: ClassTag](json: Array[String], expected: List[T]) = {
       val sqlContext = new SQLContext(sc)
-      val df = sqlContext.jsonRDD(sc.parallelize(json))
-      val rdd = toRDD[T](df).valueOr { es => fail((es.head :: es.tail).mkString("\n")) }
 
-      assert(rdd.collect().toList == expected)
+      val rows = sqlContext.jsonRDD(sc.parallelize(json))
+      def fromRow() = {
+        val rdd = toRDD[T](rows).valueOr { es => fail((es.head :: es.tail).mkString("\n")) }
+
+        assert(rdd.collect().toList == expected)
+      }
+      fromRow()
+
+      def toRow() = {
+        val df = toDataFrame(sc.parallelize(expected), sqlContext)
+
+        assert(df.collectAsList() == rows.collectAsList())
+        assert(df.schema == rows.schema)
+      }
+      toRow()
     }
 
     def testFailure[T: RowConverter: ClassTag](json: Array[String], expected: NonEmptyList[String]) = {

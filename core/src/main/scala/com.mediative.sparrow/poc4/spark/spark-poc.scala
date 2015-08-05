@@ -1,7 +1,9 @@
 package com.mediative.sparrow.poc4
 package spark
 
+import org.apache.spark.SparkContext
 import org.apache.spark.rdd.RDD
+import org.apache.spark.sql
 import org.apache.spark.sql._
 import org.apache.spark.sql.types._
 
@@ -17,6 +19,42 @@ object DataFrameReader {
     val f = rc.reader
 
     Success(df.map { row => f(RowWrapper(schema, row)) })
+  }
+
+  def toDataFrame[T](rdd: RDD[T], sql: SQLContext)(implicit rc: RowConverter[T]) = {
+    val struct: StructType = toStruct(rc.schema)
+    val rows = rdd.map(rc.writer(RowWrapper.empty) andThen toRow)
+    sql.createDataFrame(rows, struct)
+  }
+
+  def toRow(row: Sparrow): Row = ???
+  def toStruct(schema: Schema): StructType = {
+    StructType(schema.fields.map(toField))
+  }
+  def toField(field: FieldDescriptor): StructField = {
+    def go: FieldType[_] => (DataType, Boolean) = {
+      case FieldType.OptionType(el) =>
+        val (tpe, _) = go(el)
+        tpe -> true
+      case FieldType.SafeType(el) =>
+        val (tpe, _) = go(el)
+        tpe -> true
+      case FieldType.StringType => StringType -> false
+      case FieldType.ByteType => ByteType-> false
+      case FieldType.IntType => IntegerType-> false
+      case FieldType.LongType => LongType -> false
+      case FieldType.FloatType => FloatType -> false
+      case FieldType.DoubleType => DoubleType -> false
+      case FieldType.BigDecimalType => DecimalType.Unlimited -> false
+      case FieldType.BigIntType => DecimalType.Unlimited -> false
+      case FieldType.DateType(_) => TimestampType -> false
+      case FieldType.RowType(el) => toStruct(el) -> false
+      case FieldType.ListType(el) =>
+        val (tpe, _) = go(el)
+        ArrayType(tpe) -> false
+    }
+    val (dataType, optional) = go(field.fieldType)
+    StructField(field.name, dataType, optional)
   }
 }
 
@@ -51,4 +89,8 @@ case class RowWrapper(struct: StructType, row: Row) extends Sparrow {
 
   override def +(other: Sparrow): Sparrow = ???
   override def +(field: Field[_]): Sparrow = ???
+}
+
+object RowWrapper {
+  def empty: RowWrapper = ???
 }
