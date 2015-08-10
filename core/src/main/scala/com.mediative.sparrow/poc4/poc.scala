@@ -4,6 +4,8 @@ import com.github.nscala_time.time.Imports._
 import com.mediative.sparrow.poc3.PrimitiveType
 import org.joda.time.format.DateTimeFormatter
 
+import scala.reflect.ClassTag
+
 sealed trait Safe[+T] {
   def map[U](f: T => U): Safe[U] = this match {
     case Proper(value) => Proper(f(value))
@@ -13,6 +15,13 @@ sealed trait Safe[+T] {
     case Proper(value) => f(value)
     case other: Failed => other
   }
+
+  // FIXME
+  def |@|[U](other: Safe[U]): Safe[(T, U)] =
+    for {
+      t <- this
+      u <- other
+    } yield (t, u)
 
   def getRequired: T = toOption getOrElse {
     sys.error("Required value is missing")
@@ -26,8 +35,12 @@ sealed trait Safe[+T] {
 }
 
 object Safe {
-  def apply[T](block: => T): Safe[T] =
-    Proper(block) // TODO Use flatMap to have error handling (which needs to be added to flatMap)
+  def apply[T](block: => T): Safe[T] = {
+    val value = block
+    // TODO Use flatMap to have error handling (which needs to be added to flatMap)
+    if (value != null) Proper(value)
+    else Missing
+  }
 
   // TODO Make this a real applicative
   def map2[A, B, C](sa: Safe[A], sb: Safe[B])(f: (A, B) => C): Safe[C] =
@@ -80,18 +93,39 @@ object Schema {
 case class TypedValue[T](fieldType: FieldType[T], value: Safe[T])
 
 object TypedValue {
-  def apply[T](value: T)(implicit fieldType: FieldType[T]): TypedValue[T] = TypedValue(fieldType, Safe(value))
+  def apply[T](value: Safe[T])(implicit fieldType: FieldType[T]): TypedValue[T] = TypedValue(fieldType, value)
 }
 
-case class Field[T](name: String, fieldType: FieldType[T], value: T)
+case class Field[T](name: String, fieldType: FieldType[T], value: Safe[T]) {
+  def typedValue = TypedValue(fieldType, value)
+}
+
+object Field {
+  def apply[T](name: String, typedValue: TypedValue[T]): Field[T] =
+    Field(name, typedValue.fieldType, typedValue.value)
+}
 
 trait AllInstances {
 
   trait Sparrow {
-    def apply[T: FieldType](fieldName: String): T
-
+    def apply[T: FieldType](fieldName: String): Safe[T]
     def +(other: Sparrow): Sparrow
     def +(field: Field[_]): Sparrow
+  }
+
+  object Sparrow {
+    def apply(fields: Field[_]*) = SimpleSparrow(fields.map(f => f.name -> f.typedValue).toMap)
+  }
+  case class SimpleSparrow(fields: Map[String, TypedValue[_]]) extends Sparrow{
+    override def apply[T](fieldName: String)(implicit fieldType: FieldType[T]): Safe[T] = {
+      fields.get(fieldName) match {
+        case Some(TypedValue(tpe, value)) if tpe == fieldType => value.asInstanceOf[Safe[T]]
+        case None => Missing
+        case _ => sys.error(s"${fields.get(fieldName)} - expected $fieldType ")
+      }
+    }
+    override def +(other: Sparrow): Sparrow = ???
+    override def +(field: Field[_]): Sparrow = ???
   }
 
   import FieldType._
@@ -105,12 +139,12 @@ trait AllInstances {
   )
 }
 
-case class Transformer[A, B](reader: A => B, writer: B => A)
+case class Transformer[A, B](reader: Safe[A] => Safe[B], writer: B => A)
 
 object Transformer {
   def from[A, B](reader: A => B, writer: B => A): Transformer[A, B] =
-    //Transformer(_.map(reader), writer)
-    Transformer(reader, writer)
+    Transformer(_.map(reader), writer)
+//    Transformer(reader, writer)
 }
 
 sealed trait FieldConverter[A] extends Serializable { self =>
@@ -119,19 +153,19 @@ sealed trait FieldConverter[A] extends Serializable { self =>
 
   def fieldType: FieldType[PrimitiveType]
 
-  def reader: PrimitiveType => A
-  def writer(emptyRow: Sparrow): A => PrimitiveType
+  def reader: Safe[PrimitiveType] => Safe[A]
+  def writer: A => Safe[PrimitiveType]
 
   def transform[B](transformer: Transformer[A, B]): FieldConverter[B] =
     new FieldConverter[B] {
       override type PrimitiveType = self.PrimitiveType
       override def fieldType: FieldType[self.PrimitiveType] = self.fieldType
 
-      override def reader: PrimitiveType => B =
+      override def reader: Safe[PrimitiveType] => Safe[B] =
         self.reader andThen transformer.reader
 
-      override def writer(emptyRow: Sparrow): B => PrimitiveType =
-        self.writer(emptyRow) compose transformer.writer
+      override def writer: B => Safe[PrimitiveType] =
+        self.writer compose transformer.writer
     }
 }
 
@@ -146,25 +180,29 @@ object FieldConverter {
     new FieldConverter[A] {
       override type PrimitiveType = A
       override def fieldType: FieldType[PrimitiveType] = ft
-      override def reader: A => A = identity
-      override def writer(emptyRow: Sparrow): A => A = identity
+      override def reader: Safe[A] => Safe[A] = identity
+      override def writer: A => Safe[A] = Safe(_)
     }
 
   implicit def optionConverter[A](implicit fc: FieldConverter[A]): FieldConverter[Option[A]] =
     new FieldConverter[Option [A]] {
-      override def fieldType: FieldType[PrimitiveType] = FieldType.OptionType(fc.fieldType)
-      override type PrimitiveType = Option[fc.PrimitiveType]
+      override def fieldType: FieldType[PrimitiveType] = fc.fieldType
+      override type PrimitiveType = fc.PrimitiveType
 
-      override def reader: PrimitiveType => Option[A] = _.map(fc.reader)
-      override def writer(emptyRow: Sparrow): Option[A] => PrimitiveType = _.map(fc.writer(emptyRow))
+      override def reader: Safe[PrimitiveType] => Safe[Option[A]] = fc.reader(_) match {
+        case Proper(value) => Proper(Some(value))
+        case Missing => Proper(None)
+        case other: Invalid => other
+      }
+      override def writer: Option[A] => Safe[PrimitiveType] = ??? //_.map(fc.writer)
     }
 
   implicit def safeConverter[A](implicit fc: FieldConverter[A]): FieldConverter[Safe[A]] =
     new FieldConverter[Safe[A]] {
-      override def fieldType: FieldType[PrimitiveType] = FieldType.SafeType(fc.fieldType)
-      override type PrimitiveType = Safe[fc.PrimitiveType]
-      override def writer(emptyRow: Sparrow): Safe[A] => PrimitiveType = ???
-      override def reader: PrimitiveType => Safe[A] = ???
+      override def fieldType = fc.fieldType
+      override type PrimitiveType = fc.PrimitiveType
+      override def reader: Safe[PrimitiveType] => Safe[Safe[A]] = ???
+      override def writer: Safe[A] => Safe[PrimitiveType] = ???
     }
 
   implicit def fromRowConverter[A](implicit rc: RowConverter[A]): FieldConverter[A] =
@@ -172,34 +210,48 @@ object FieldConverter {
       override def fieldType: FieldType[Sparrow] = FieldType.RowType(rc.schema)
       override type PrimitiveType = Sparrow
 
-      override def reader: Sparrow => A = rc.reader
-      override def writer(emptyRow: Sparrow): A => Sparrow = rc.writer(emptyRow)
+      override def reader: Safe[Sparrow] => Safe[A] = _.flatMap(rc.reader)
+      override def writer: A => Safe[Sparrow] = a => Safe(rc.writer(a))
     }
 }
 
+//trait RowProvider {
+//  type OutputRow <: OutputRowOps
+//
+//  trait OutputRowOps {
+//    def +(other: OutputRow): OutputRow
+//    def +(field: Field[_]): OutputRow
+//
+//    def toSparrow: Sparrow
+//  }
+//
+//  def Row(fields: Field[_]): OutputRow
+//
+//}
+
 trait RowConverter[A] extends Serializable { self =>
   def schema: Schema
-  def reader: Sparrow => A
-  def writer(emptyRow: Sparrow): A => Sparrow
+  def reader: Sparrow => Safe[A]
+  def writer: A => Sparrow
 
   def transform[B](transformer: Transformer[A, B]): RowConverter[B] =
     new RowConverter[B] {
       override def schema: Schema = self.schema
 
-      override def reader: Sparrow => B =
+      override def reader: Sparrow => Safe[B] =
         self.reader andThen transformer.reader
-      override def writer(emptyRow: Sparrow): B => Sparrow =
-        transformer.writer andThen self.writer(emptyRow)
+      override def writer: B => Sparrow =
+        transformer.writer andThen self.writer
     }
 
   def and[B](that: RowConverter[B]): RowConverter[(A, B)] =
     new RowConverter[(A, B)] {
       override def schema: Schema = self.schema
 
-      override def reader: Sparrow => (A, B) = row =>
-        (self.reader(row), that.reader(row))
-      override def writer(emptyRow: Sparrow): ((A, B)) => Sparrow = {
-        case (a, b) => self.writer(emptyRow)(a) + that.writer(emptyRow)(b)
+      override def reader: Sparrow => Safe[(A, B)] = row =>
+        self.reader(row) |@| that.reader(row)
+      override def writer: ((A, B)) => Sparrow = {
+        case (a, b) => self.writer(a) + that.writer(b)
       }
     }
 
@@ -210,13 +262,13 @@ object RowConverter {
     new RowConverter[A] {
       override def schema: Schema = Schema(FieldDescriptor(name, fc.fieldType))
 
-      override def reader: Sparrow => A = {
+      override def reader: Sparrow => Safe[A] = {
         val tpe = fc.fieldType
         row => fc.reader(row(name)(tpe))
       }
-      override def writer(emptyRow: Sparrow): A => Sparrow = {
+      override def writer: A => Sparrow = {
         val tpe = fc.fieldType
-        value => emptyRow + Field(name, tpe, fc.writer(emptyRow)(value))
+        value => Sparrow(Field(name, tpe, fc.writer(value)))
       }
     }
 

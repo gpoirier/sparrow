@@ -18,16 +18,16 @@ object DataFrameReader {
     val schema = df.schema
     val f = rc.reader
 
-    Success(df.map { row => f(RowWrapper(schema, row)) })
+    Success(df.map { row => f(RowWrapper(schema, row)).getRequired })
   }
 
   def toDataFrame[T](rdd: RDD[T], sql: SQLContext)(implicit rc: RowConverter[T]) = {
-    val struct: StructType = toStruct(rc.schema)
-    val rows = rdd.map(rc.writer(RowWrapper.empty) andThen toRow)
-    sql.createDataFrame(rows, struct)
+//    val struct: StructType = toStruct(rc.schema)
+//    val rows = rdd.map(rc.writer(SparkRowProvider)(_).toRow)
+//    sql.createDataFrame(rows, struct)
+    ???
   }
 
-  def toRow(row: Sparrow): Row = ???
   def toStruct(schema: Schema): StructType = {
     StructType(schema.fields.map(toField))
   }
@@ -58,8 +58,40 @@ object DataFrameReader {
   }
 }
 
-case class RowWrapper(struct: StructType, row: Row) extends Sparrow {
-  override def apply[A](name: String)(implicit fieldType: FieldType[A]): A = {
+object RowWrapper {
+  def apply(struct: StructType, row: Row): Sparrow = {
+    val fields = for {
+      (tpe, index) <- struct.fields.zipWithIndex
+    } yield {
+      val typedValue = tpe.dataType match {
+        case StringType => TypedValue(Safe(row.getString(index)))
+        case LongType => TypedValue(Safe(row.getLong(index)))
+        case childType: StructType =>
+          val childValue = row.getStruct(index)
+          val childRow = RowWrapper(childType, childValue)
+          val fieldType = FieldType.RowType(toSchema(childType))
+          TypedValue(fieldType, Safe(childRow))
+        case _ => ???
+      }
+      Field(tpe.name, typedValue)
+    }
+    Sparrow(fields: _*)
+  }
+
+  def toSchema(struct: StructType): Schema = {
+    val fields = struct.fields.map { field =>
+      val fieldType = field.dataType match {
+        case StringType => FieldType.StringType
+        case LongType => FieldType.LongType
+      }
+      FieldDescriptor(field.name, fieldType)
+    }
+    Schema(fields.toVector)
+  }
+}
+/*
+case class RowWrapper0(struct: StructType, row: Row) /*extends Sparrow */ {
+  def apply[A](name: String)(implicit fieldType: FieldType[A]): A = {
     val index = struct.fieldNames.indexOf(name)
     if (index == -1) fieldType match {
       case FieldType.OptionType(_) => None
@@ -86,11 +118,30 @@ case class RowWrapper(struct: StructType, row: Row) extends Sparrow {
       go(fieldType)
     }
   }
-
-  override def +(other: Sparrow): Sparrow = ???
-  override def +(field: Field[_]): Sparrow = ???
 }
-
-object RowWrapper {
-  def empty: RowWrapper = ???
-}
+*/
+//object SparkRowProvider extends RowProvider {
+//  override type OutputRow = SparkOutputRow
+//
+//  case class SparkOutputRow(fields: IndexedSeq[Field[_]]) extends OutputRowOps {
+//
+//    override def +(that: SparkOutputRow): SparkOutputRow = SparkOutputRow(this.fields ++ that.fields)
+//    override def +(field: Field[_]): SparkOutputRow = SparkOutputRow(fields :+ field)
+//
+//    override def toSparrow: Sparrow = new Sparrow {
+//      override def apply[T](fieldName: String)(implicit fieldType: FieldType[T]): T = {
+//        fields.collectFirst {
+//          case Field(`fieldName`, `fieldType`, value) => value
+//        } getOrElse {
+//          sys.error("TODO")
+//        }
+//      }
+//    }
+//
+//    def toRow: Row = {
+//      sql.Row(fields.map(_.value): _*)
+//    }
+//  }
+//
+//  override def Row(fields: Field[_]): OutputRow = SparkOutputRow(Vector(fields))
+//}
