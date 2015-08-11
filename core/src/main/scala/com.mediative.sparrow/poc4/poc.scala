@@ -136,12 +136,6 @@ object Field {
 
 trait AllInstances {
 
-//  case class Sparrow {
-//    def apply[T: FieldType](fieldName: String): Safe[T]
-//    def +(other: Sparrow): Sparrow
-//    def +(field: Field[_]): Sparrow
-//  }
-
   object Sparrow {
     def apply(fields: Field[_]*): Sparrow = Sparrow(fields.toIndexedSeq)
   }
@@ -174,7 +168,6 @@ case class Transformer[A, B](reader: Safe[A] => Safe[B], writer: B => A)
 object Transformer {
   def from[A, B](reader: A => B, writer: B => A): Transformer[A, B] =
     Transformer(_.map(reader), writer)
-//    Transformer(reader, writer)
 }
 
 sealed trait FieldConverter[A] extends Serializable { self =>
@@ -251,20 +244,6 @@ object FieldConverter {
       override def writer: A => Safe[Sparrow] = a => Safe(rc.writer(a))
     }
 }
-
-//trait RowProvider {
-//  type OutputRow <: OutputRowOps
-//
-//  trait OutputRowOps {
-//    def +(other: OutputRow): OutputRow
-//    def +(field: Field[_]): OutputRow
-//
-//    def toSparrow: Sparrow
-//  }
-//
-//  def Row(fields: Field[_]): OutputRow
-//
-//}
 
 trait RowConverter[A] extends Serializable { self =>
   def schema: Schema
