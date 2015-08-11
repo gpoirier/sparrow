@@ -2,6 +2,7 @@ package com.mediative.sparrow.poc4
 
 import com.github.nscala_time.time.Imports._
 import com.mediative.sparrow.poc3.PrimitiveType
+import com.mediative.sparrow.poc4.FieldType.RowType
 import org.joda.time.format.DateTimeFormatter
 
 import scala.reflect.ClassTag
@@ -55,7 +56,22 @@ case class Proper[+T](value: T) extends Safe[T]
 case class Invalid(error: String) extends Failed
 case object Missing extends Failed
 
-sealed trait FieldType[T]
+sealed trait FieldType[T] {
+  def isCompatible(that: FieldType[_]): Boolean = {
+    if (this == that) true
+    else isTypeCompatible(this, that)
+  }
+
+  import FieldType._
+  private def isTypeCompatible(ft1: FieldType[_], ft2: FieldType[_]): Boolean =
+    (ft1, ft2) match {
+      case (DateType(_), DateType(_)) => true
+      case (RowType(_), RowType(_)) => true
+      case (ListType(el1), ListType(el2)) => el1 isCompatible el2
+      case _ => false
+    }
+
+}
 
 object FieldType {
   implicit case object StringType extends FieldType[String]
@@ -119,7 +135,7 @@ trait AllInstances {
   case class SimpleSparrow(fields: Map[String, TypedValue[_]]) extends Sparrow{
     override def apply[T](fieldName: String)(implicit fieldType: FieldType[T]): Safe[T] = {
       fields.get(fieldName) match {
-        case Some(TypedValue(tpe, value)) if tpe == fieldType => value.asInstanceOf[Safe[T]]
+        case Some(TypedValue(tpe, value)) if tpe isCompatible fieldType => value.asInstanceOf[Safe[T]]
         case None => Missing
         case _ => sys.error(s"${fields.get(fieldName)} - expected $fieldType ")
       }
