@@ -28,6 +28,12 @@ sealed trait Safe[+T] {
     sys.error("Required value is missing")
   }
 
+  def getOrElse[U >: T](defaultValue: => U): U = this match {
+    case Proper(value) => value
+    case _ => defaultValue
+  }
+
+
   def toOption: Option[T] = this match {
     case Proper(value) => Some(value)
     case Invalid(message) => sys.error(message)
@@ -49,6 +55,8 @@ object Safe {
       a <- sa
       b <- sb
     } yield f(a, b)
+
+  def fromOption[T](opt: Option[T]): Safe[T] = opt.fold[Safe[T]](Missing)(Proper.apply)
 }
 
 sealed trait Failed extends Safe[Nothing]
@@ -87,19 +95,24 @@ object FieldType {
   case class RowType(schema: Schema) extends FieldType[Sparrow]
   case class ListType[T](elementType: FieldType[T]) extends FieldType[List[T]]
 
-  case class OptionType[T](elementType: FieldType[T]) extends FieldType[Option[T]]
-  case class SafeType[T](elementType: FieldType[T]) extends FieldType[Safe[T]]
+//  case class OptionType[T](elementType: FieldType[T]) extends FieldType[Option[T]]
+//  case class SafeType[T](elementType: FieldType[T]) extends FieldType[Safe[T]]
 }
 
-case class FieldDescriptor(name: String, fieldType: FieldType[_])
+case class FieldDescriptor(name: String, fieldType: FieldType[_], optional: Boolean)
 
 object FieldDescriptor {
   object Implicits {
     implicit def toDescriptor(tuple: (String, FieldType[_])): FieldDescriptor =
-      FieldDescriptor(tuple._1, tuple._2)
+      FieldDescriptor(tuple._1, tuple._2, optional = false)
+
+    implicit def toDescriptor(tuple: (String, FieldType[_], Boolean)): FieldDescriptor =
+      FieldDescriptor(tuple._1, tuple._2, tuple._3)
   }
 }
-case class Schema(fields: IndexedSeq[FieldDescriptor])
+case class Schema(fields: IndexedSeq[FieldDescriptor]) {
+  def +(other: Schema): Schema = Schema(fields ++ other.fields)
+}
 
 object Schema {
   def apply(fields: FieldDescriptor*): Schema =
@@ -123,25 +136,26 @@ object Field {
 
 trait AllInstances {
 
-  trait Sparrow {
-    def apply[T: FieldType](fieldName: String): Safe[T]
-    def +(other: Sparrow): Sparrow
-    def +(field: Field[_]): Sparrow
-  }
+//  case class Sparrow {
+//    def apply[T: FieldType](fieldName: String): Safe[T]
+//    def +(other: Sparrow): Sparrow
+//    def +(field: Field[_]): Sparrow
+//  }
 
   object Sparrow {
-    def apply(fields: Field[_]*) = SimpleSparrow(fields.map(f => f.name -> f.typedValue).toMap)
+    def apply(fields: Field[_]*): Sparrow = Sparrow(fields.toIndexedSeq)
   }
-  case class SimpleSparrow(fields: Map[String, TypedValue[_]]) extends Sparrow{
-    override def apply[T](fieldName: String)(implicit fieldType: FieldType[T]): Safe[T] = {
-      fields.get(fieldName) match {
-        case Some(TypedValue(tpe, value)) if tpe isCompatible fieldType => value.asInstanceOf[Safe[T]]
+  case class Sparrow(fields: IndexedSeq[Field[_]]) {
+    def apply[T](fieldName: String)(implicit fieldType: FieldType[T]): Safe[T] = {
+      val opt = fields.find(_.name == fieldName)
+      opt match {
+        case Some(Field(_, tpe, value)) if tpe isCompatible fieldType => value.asInstanceOf[Safe[T]]
         case None => Missing
-        case _ => sys.error(s"${fields.get(fieldName)} - expected $fieldType ")
+        case _ => sys.error(s"$opt - expected $fieldType ")
       }
     }
-    override def +(other: Sparrow): Sparrow = ???
-    override def +(field: Field[_]): Sparrow = ???
+    def +(other: Sparrow): Sparrow = Sparrow(fields ++ other.fields)
+    def +(field: Field[_]): Sparrow = this + Sparrow(field)
   }
 
   import FieldType._
@@ -168,6 +182,7 @@ sealed trait FieldConverter[A] extends Serializable { self =>
   type PrimitiveType
 
   def fieldType: FieldType[PrimitiveType]
+  def optional: Boolean
 
   def reader: Safe[PrimitiveType] => Safe[A]
   def writer: A => Safe[PrimitiveType]
@@ -176,6 +191,7 @@ sealed trait FieldConverter[A] extends Serializable { self =>
     new FieldConverter[B] {
       override type PrimitiveType = self.PrimitiveType
       override def fieldType: FieldType[self.PrimitiveType] = self.fieldType
+      override def optional = self.optional
 
       override def reader: Safe[PrimitiveType] => Safe[B] =
         self.reader andThen transformer.reader
@@ -196,6 +212,7 @@ object FieldConverter {
     new FieldConverter[A] {
       override type PrimitiveType = A
       override def fieldType: FieldType[PrimitiveType] = ft
+      override def optional = false
       override def reader: Safe[A] => Safe[A] = identity
       override def writer: A => Safe[A] = Safe(_)
     }
@@ -204,19 +221,22 @@ object FieldConverter {
     new FieldConverter[Option [A]] {
       override def fieldType: FieldType[PrimitiveType] = fc.fieldType
       override type PrimitiveType = fc.PrimitiveType
+      override def optional = true
 
       override def reader: Safe[PrimitiveType] => Safe[Option[A]] = fc.reader(_) match {
         case Proper(value) => Proper(Some(value))
         case Missing => Proper(None)
         case other: Invalid => other
       }
-      override def writer: Option[A] => Safe[PrimitiveType] = ??? //_.map(fc.writer)
+      override def writer: Option[A] => Safe[PrimitiveType] =
+        _.fold[Safe[PrimitiveType]](Missing)(fc.writer)
     }
 
   implicit def safeConverter[A](implicit fc: FieldConverter[A]): FieldConverter[Safe[A]] =
     new FieldConverter[Safe[A]] {
-      override def fieldType = fc.fieldType
       override type PrimitiveType = fc.PrimitiveType
+      override def fieldType = fc.fieldType
+      override def optional = true
       override def reader: Safe[PrimitiveType] => Safe[Safe[A]] = ???
       override def writer: Safe[A] => Safe[PrimitiveType] = ???
     }
@@ -225,6 +245,7 @@ object FieldConverter {
     new FieldConverter[A] {
       override def fieldType: FieldType[Sparrow] = FieldType.RowType(rc.schema)
       override type PrimitiveType = Sparrow
+      override def optional = false
 
       override def reader: Safe[Sparrow] => Safe[A] = _.flatMap(rc.reader)
       override def writer: A => Safe[Sparrow] = a => Safe(rc.writer(a))
@@ -262,7 +283,7 @@ trait RowConverter[A] extends Serializable { self =>
 
   def and[B](that: RowConverter[B]): RowConverter[(A, B)] =
     new RowConverter[(A, B)] {
-      override def schema: Schema = self.schema
+      override def schema: Schema = self.schema + that.schema
 
       override def reader: Sparrow => Safe[(A, B)] = row =>
         self.reader(row) |@| that.reader(row)
@@ -276,7 +297,7 @@ trait RowConverter[A] extends Serializable { self =>
 object RowConverter {
   def field[A](name: String)(implicit fc: FieldConverter[A]): RowConverter[A] =
     new RowConverter[A] {
-      override def schema: Schema = Schema(FieldDescriptor(name, fc.fieldType))
+      override def schema: Schema = Schema(FieldDescriptor(name, fc.fieldType, fc.optional))
 
       override def reader: Sparrow => Safe[A] = {
         val tpe = fc.fieldType

@@ -3,6 +3,7 @@ package spark
 
 import org.apache.spark.SparkContext
 import org.apache.spark.sql._
+import org.apache.spark.sql.types._
 import org.scalatest.{Transformer => _, _}
 
 import scala.reflect.ClassTag
@@ -142,13 +143,29 @@ class DataFrameReaderTest extends FreeSpec with BeforeAndAfterAll {
       }
       fromRow()
 
-//      def toRow() = {
-//        val df = toDataFrame(sc.parallelize(expected), sqlContext)
-//
-//        assert(df.collectAsList() == rows.collectAsList())
-//        assert(df.schema == rows.schema)
-//      }
-//      toRow()
+      def toRow(): Unit = {
+        val df = toDataFrame(sc.parallelize(expected), sqlContext)
+
+
+        // The Schema inferred from JSON has all fields nullable
+        // and some fields might be missing if they are optionals
+        val (optionals, required) = df.schema.fields.partition(_.nullable)
+        val onlyRequired = optionals.foldLeft(rows.schema.fields.toSet) { (acc, field) =>
+          acc - field.copy(nullable = true)
+        }
+        assert(required.map(_.copy(nullable = true)).toSet == onlyRequired)
+
+        (df.collect().toList zip rows.collect().toList) foreach { case (r1, r2) =>
+          for (i1 <- df.schema.indices) {
+            val fieldName = df.schema.fieldNames(i1)
+            val i2 = rows.schema.fieldNames.indexOf(fieldName)
+            val v2 = if (i2 == -1) null else r2.get(i2)
+            assert(r1.get(i1) == v2)
+          }
+        }
+
+      }
+      toRow()
     }
 
     def testFailure[T: RowConverter: ClassTag](json: Array[String], expected: NonEmptyList[String]) = {
@@ -210,7 +227,7 @@ class DataFrameReaderTest extends FreeSpec with BeforeAndAfterAll {
 
       testSuccess(json, expected)
     }
-////
+//
 //    "validate extra fields" in {
 //      val json = Array(
 //        """{"name": "Guillaume", "inner": {"name": "First's Inner", "count": 121, "abc": 244}}""",
