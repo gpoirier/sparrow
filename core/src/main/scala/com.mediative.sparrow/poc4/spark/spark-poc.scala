@@ -1,6 +1,7 @@
 package com.mediative.sparrow.poc4
 package spark
 
+import com.mediative.sparrow.poc4.FieldType.RowType
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql._
 import org.apache.spark.sql.types._
@@ -25,8 +26,14 @@ object DataFrameReader {
     sql.createDataFrame(rows, struct)
   }
 
-  def toRow(row: Sparrow): Row =
-    Row(row.fields.map(_.value.getOrElse(null)): _*)
+  def toRow(row: Sparrow): Row = {
+    val values = row.fields.map(_.typedValue).map {
+      case TypedValue(RowType(_), value) => value.asInstanceOf[Safe[Sparrow]].map(toRow)
+      // TODO Handle List
+      case TypedValue(_, value) => value
+    }
+    Row(values.map(_.getOrElse(null)): _*)
+  }
 
   def toStruct(schema: Schema): StructType =
     StructType(schema.fields.map(toField))

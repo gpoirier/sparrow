@@ -136,36 +136,52 @@ class DataFrameReaderTest extends FreeSpec with BeforeAndAfterAll {
       val sqlContext = new SQLContext(sc)
 
       val rows = sqlContext.jsonRDD(sc.parallelize(json))
-      def fromRow() = {
+      def testFromRow() = {
         val rdd = toRDD[T](rows).valueOr { es => fail((es.head :: es.tail).mkString("\n")) }
 
         assert(rdd.collect().toList == expected)
       }
-      fromRow()
+      testFromRow()
 
-      def toRow(): Unit = {
+      def testToRow() = {
         val df = toDataFrame(sc.parallelize(expected), sqlContext)
 
-
-        // The Schema inferred from JSON has all fields nullable
-        // and some fields might be missing if they are optionals
-        val (optionals, required) = df.schema.fields.partition(_.nullable)
-        val onlyRequired = optionals.foldLeft(rows.schema.fields.toSet) { (acc, field) =>
-          acc - field.copy(nullable = true)
+        def compareTypes(tpe1: StructType, tpe2: StructType): Unit = {
+          for (i1 <- tpe1.indices) {
+            val f1 = tpe1.fields(i1)
+            val fieldName = f1.name
+            val i2 = tpe2.fieldNames.indexOf(fieldName)
+            if (i2 == -1) {
+              assert(f1.nullable, s"A required field is missing: $f1.")
+            } else {
+              val f2 = tpe2.fields(i2)
+              (f1.dataType, f2.dataType) match {
+                case (tpe11: StructType, tpe22: StructType) => compareTypes(tpe11, tpe22)
+                case (dt1, dt2) => assert(dt1 == dt2, s"field name: $f1.name")
+              }
+            }
+          }
         }
-        assert(required.map(_.copy(nullable = true)).toSet == onlyRequired)
+        compareTypes(df.schema, rows.schema)
 
-        (df.collect().toList zip rows.collect().toList) foreach { case (r1, r2) =>
-          for (i1 <- df.schema.indices) {
-            val fieldName = df.schema.fieldNames(i1)
-            val i2 = rows.schema.fieldNames.indexOf(fieldName)
+        def compareRows(r1: Row, r2: Row): Unit = {
+          for (i1 <- r1.schema.indices) {
+            val v1 = r1.get(i1)
+            val fieldName = r1.schema.fieldNames(i1)
+            val i2 = r2.schema.fieldNames.indexOf(fieldName)
             val v2 = if (i2 == -1) null else r2.get(i2)
-            assert(r1.get(i1) == v2)
+            (v1, v2) match {
+              case (r11: Row, r22: Row) => compareRows(r11, r22)
+              case _ => assert(v1 == v2, s"r1: $r1, r2: $r2")
+            }
           }
         }
 
+        (df.collect().toList zip rows.collect().toList) foreach { case (r1, r2) =>
+          compareRows(r1, r2)
+        }
       }
-      toRow()
+      testToRow()
     }
 
     def testFailure[T: RowConverter: ClassTag](json: Array[String], expected: NonEmptyList[String]) = {
