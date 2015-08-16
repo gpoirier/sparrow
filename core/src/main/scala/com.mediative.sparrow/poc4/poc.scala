@@ -2,8 +2,8 @@ package com.mediative.sparrow.poc4
 
 import com.github.nscala_time.time.Imports._
 import com.mediative.sparrow.poc3.PrimitiveType
-import com.mediative.sparrow.poc4.FieldType.RowType
-import org.joda.time.format.DateTimeFormatter
+import com.mediative.sparrow.poc4.FieldType.{ListType, RowType}
+import org.joda.time.format.{DateTimeParser, DateTimeFormatter}
 
 import scala.reflect.ClassTag
 
@@ -17,12 +17,12 @@ sealed trait Safe[+T] {
     case other: Failed => other
   }
 
-  // FIXME
-  def |@|[U](other: Safe[U]): Safe[(T, U)] =
-    for {
-      t <- this
-      u <- other
-    } yield (t, u)
+  def |@|[U](other: Safe[U]): Safe[(T, U)] = (this, other) match {
+    case (Proper(a), Proper(b)) => Proper(a -> b)
+    case (Missing, Missing) => Missing
+    // FIXME
+    case (sa, sb) => Invalid(sa.toString + " :: " +  sb.toString)
+  }
 
   def getRequired: T = toOption getOrElse {
     sys.error("Required value is missing")
@@ -51,12 +51,19 @@ object Safe {
 
   // TODO Make this a real applicative
   def map2[A, B, C](sa: Safe[A], sb: Safe[B])(f: (A, B) => C): Safe[C] =
-    for {
-      a <- sa
-      b <- sb
-    } yield f(a, b)
+    (sa |@| sb)(f)
 
   def fromOption[T](opt: Option[T]): Safe[T] = opt.fold[Safe[T]](Missing)(Proper.apply)
+
+  def sequence[T](list: List[Safe[T]]): Safe[List[T]] =
+    list.foldRight(Safe(List.empty[T])) { (item, acc) =>
+      (item |@| acc)(_ :: _)
+    }
+
+
+  implicit class Safe2[A, B](safe: Safe[(A, B)]) {
+    def apply[C](f: (A, B) => C): Safe[C] = safe map f.tupled
+  }
 }
 
 sealed trait Failed extends Safe[Nothing]
@@ -92,6 +99,10 @@ object FieldType {
   implicit case object BigDecimalType extends FieldType[BigDecimal]
 
   case class DateType(fmt: DateTimeFormatter) extends FieldType[DateTime]
+  object DateType {
+    def apply(pattern: String): DateType = DateType(DateTimeFormat.forPattern(pattern))
+  }
+
   case class RowType(schema: Schema) extends FieldType[Sparrow]
   case class ListType[T](elementType: FieldType[T]) extends FieldType[List[T]]
 
@@ -132,35 +143,35 @@ case class Field[T](name: String, fieldType: FieldType[T], value: Safe[T]) {
 object Field {
   def apply[T](name: String, typedValue: TypedValue[T]): Field[T] =
     Field(name, typedValue.fieldType, typedValue.value)
+
+  object Implicits {
+    implicit def toField[T: FieldType](pair: (String, T)): Field[T] =
+      Field(pair._1, TypedValue(Safe(pair._2)))
+  }
+}
+
+object Sparrow {
+  def apply(fields: Field[_]*): Sparrow = Sparrow(fields.toIndexedSeq)
+}
+case class Sparrow(fields: IndexedSeq[Field[_]]) {
+  def apply[T](fieldName: String)(implicit fieldType: FieldType[T]): Safe[T] = {
+    val opt = fields.find(_.name == fieldName)
+    opt match {
+      case None => Missing
+      case Some(Field(_, tpe, value)) if tpe isCompatible fieldType => value.asInstanceOf[Safe[T]]
+      case _ => sys.error(s"$opt - expected $fieldType")
+    }
+  }
+  def +(other: Sparrow): Sparrow = Sparrow(fields ++ other.fields)
+  def +(field: Field[_]): Sparrow = this + Sparrow(field)
+
+  def schema = Schema(
+    fields.map(f => FieldDescriptor(f.name, f.fieldType, true))
+  )
 }
 
 trait AllInstances {
 
-  object Sparrow {
-    def apply(fields: Field[_]*): Sparrow = Sparrow(fields.toIndexedSeq)
-  }
-  case class Sparrow(fields: IndexedSeq[Field[_]]) {
-    def apply[T](fieldName: String)(implicit fieldType: FieldType[T]): Safe[T] = {
-      val opt = fields.find(_.name == fieldName)
-      opt match {
-        case Some(Field(_, tpe, value)) if tpe isCompatible fieldType => value.asInstanceOf[Safe[T]]
-        case None => Missing
-        case _ => sys.error(s"$opt - expected $fieldType ")
-      }
-    }
-    def +(other: Sparrow): Sparrow = Sparrow(fields ++ other.fields)
-    def +(field: Field[_]): Sparrow = this + Sparrow(field)
-  }
-
-  import FieldType._
-  import FieldDescriptor.Implicits._
-  val nested = Schema(
-    "id" -> LongType,
-    "name" -> StringType,
-    "child" -> RowType(
-      Schema()
-    )
-  )
 }
 
 case class Transformer[A, B](reader: Safe[A] => Safe[B], writer: B => A)
@@ -179,6 +190,9 @@ sealed trait FieldConverter[A] extends Serializable { self =>
 
   def reader: Safe[PrimitiveType] => Safe[A]
   def writer: A => Safe[PrimitiveType]
+
+  def transform[B](reader: A => B, writer: B => A): FieldConverter[B] =
+    transform(Transformer.from(reader, writer))
 
   def transform[B](transformer: Transformer[A, B]): FieldConverter[B] =
     new FieldConverter[B] {
@@ -243,6 +257,35 @@ object FieldConverter {
       override def reader: Safe[Sparrow] => Safe[A] = _.flatMap(rc.reader)
       override def writer: A => Safe[Sparrow] = a => Safe(rc.writer(a))
     }
+
+  implicit def listConverter[A](implicit fc: FieldConverter[A]): FieldConverter[List[A]] =
+    new FieldConverter[List[A]] {
+      override type PrimitiveType = List[fc.PrimitiveType]
+      override def fieldType: FieldType[PrimitiveType] = ListType(fc.fieldType)
+      override def optional: Boolean = false
+
+      override def reader: Safe[PrimitiveType] => Safe[List[A]] = _.flatMap { list =>
+        Safe.sequence(list.map(a => fc.reader(Safe(a))))
+      }
+
+      override def writer: List[A] => Safe[PrimitiveType] = { list =>
+        Safe.sequence(list.map(fc.writer))
+      }
+    }
+}
+
+case class DatePattern private (tpe: FieldType[DateTime])
+
+object DatePattern {
+  import FieldConverter.primitive
+  import FieldType.DateType
+
+  def apply(fmt: DateTimeFormatter): DatePattern = DatePattern(DateType(fmt))
+  def apply(pattern: String): DatePattern = DatePattern(DateTimeFormat.forPattern(pattern))
+
+  implicit def toDateTime(pattern: DatePattern): FieldConverter[DateTime] = primitive(pattern.tpe)
+  implicit def toLocalDate(pattern: DatePattern): FieldConverter[LocalDate] =
+    primitive(pattern.tpe).transform(_.toLocalDate, _.toDateTimeAtStartOfDay)
 }
 
 trait RowConverter[A] extends Serializable { self =>
@@ -264,8 +307,9 @@ trait RowConverter[A] extends Serializable { self =>
     new RowConverter[(A, B)] {
       override def schema: Schema = self.schema + that.schema
 
-      override def reader: Sparrow => Safe[(A, B)] = row =>
+      override def reader: Sparrow => Safe[(A, B)] = row => {
         self.reader(row) |@| that.reader(row)
+      }
       override def writer: ((A, B)) => Sparrow = {
         case (a, b) => self.writer(a) + that.writer(b)
       }
