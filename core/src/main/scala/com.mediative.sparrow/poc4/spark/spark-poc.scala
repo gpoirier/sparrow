@@ -10,20 +10,52 @@ import scala.reflect.ClassTag
 
 import com.mediative.sparrow.Alias._
 
-import scalaz.Success
+import scalaz.syntax.validation._
+import scalaz.syntax.apply._
+
+import org.log4s._
 
 object DataFrameReader {
+
+  private[this] val logger = getLogger
+
   def toRDD[T: ClassTag](df: DataFrame)(implicit rc: RowConverter[T]): V[RDD[T]] = {
     val schema = df.schema
     val f = rc.reader
-
-    Success(df.map { row => f(toSparrow(schema, row)).getRequired })
+    validate(toStruct(rc.schema), schema) map { _ =>
+      df.map { row => f(toSparrow(schema, row)).getRequired }
+    }
   }
 
   def toDataFrame[T](rdd: RDD[T], sql: SQLContext)(implicit rc: RowConverter[T]) = {
     val struct: StructType = toStruct(rc.schema)
     val rows = rdd.map(rc.writer andThen toRow)
     sql.createDataFrame(rows, struct)
+  }
+
+  def validate(tpe1: StructType, tpe2: StructType): V[Unit] = {
+    logger.trace(s"Comparing two types,\nType 1: $tpe1\nType 2: $tpe2")
+    val ok: V[Unit] = ().success
+    val (result, remainder) = tpe1.indices.foldLeft(ok -> tpe2.fields.toSet) { case ((acc, fields), i1) =>
+      val f1 = tpe1.fields(i1)
+      val fieldName = f1.name
+      val field2 = fields.find(_.name == fieldName)
+      val result =
+        field2.fold {
+          if (f1.nullable) { logger.trace(s"$f1 has no match but is nullable"); ok }
+          else s"A required field is missing: $f1.".failureNel
+        } { f2 =>
+          (f1.dataType, f2.dataType) match {
+            case (tpe11: StructType, tpe22: StructType) => validate(tpe11, tpe22)
+            case (dt1, dt2) =>
+              if (dt1 == dt2) { logger.trace(s"Field ${f1.name} has matching type $dt1"); ok }
+              else s"The field '${f1.name}' isn't a $dt1 as expected, $dt2 received.".failureNel
+          }
+      }
+      (acc |@| result) { (_, _) => () } -> (fields -- field2.toSet)
+    }
+    if (remainder.isEmpty) result
+    else s"There are extra fields: ${remainder.map(_.name)}".failureNel
   }
 
   def toRow(row: Sparrow): Row = {
