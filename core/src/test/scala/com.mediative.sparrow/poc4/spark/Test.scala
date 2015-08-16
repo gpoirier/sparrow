@@ -131,23 +131,8 @@ class DataFrameReaderTest extends FreeSpec with BeforeAndAfterAll {
       def testToRow() = {
         val df = toDataFrame(sc.parallelize(expected), sqlContext)
 
-        def compareTypes(tpe1: StructType, tpe2: StructType): Unit = {
-          for (i1 <- tpe1.indices) {
-            val f1 = tpe1.fields(i1)
-            val fieldName = f1.name
-            val i2 = tpe2.fieldNames.indexOf(fieldName)
-            if (i2 == -1) {
-              assert(f1.nullable, s"A required field is missing: $f1.")
-            } else {
-              val f2 = tpe2.fields(i2)
-              (f1.dataType, f2.dataType) match {
-                case (tpe11: StructType, tpe22: StructType) => compareTypes(tpe11, tpe22)
-                case (dt1, dt2) => assert(dt1 == dt2, s"field name: $f1.name")
-              }
-            }
-          }
-        }
-        compareTypes(df.schema, rows.schema)
+        val result = DataFrameReader.validate(df.schema, rows.schema)
+        assert(result == ().success)
 
         def compareRows(r1: Row, r2: Row): Unit = {
           for (i1 <- r1.schema.indices) {
